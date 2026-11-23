@@ -3,7 +3,8 @@
 Example single-drone PX4 launcher with scene preparation.
 
 Demonstrates:
- - Loading a Pegasus world with an environment
+ - Loading a Pegasus world with an environment (ISAAC_SIM_SCENE, ISAAC_SIM_STAGE_SCALE)
+ - Spawning at ISAAC_SIM_SPAWN_XY
  - Scaling the environment prim and adding collision geometry
  - Adding a dome light
 - Spawning a PX4 multirotor with ZED camera and RTX lidar
@@ -98,13 +99,62 @@ sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath
 from scene_prep import scale_stage_prim, add_colliders, add_dome_light, save_scene_as_contained_usd
 
 
-# --------------------- CONFIGURATION ---------------------
-# Environment to load. Swap this URL/key for any other scene.
-ENV_URL = SIMULATION_ENVIRONMENTS["Default Environment"]
+def resolve_scene_from_env(default_key="Default Environment"):
+    """ISAAC_SIM_SCENE (a SIMULATION_ENVIRONMENTS key or a USD URL/path) and
+    ISAAC_SIM_STAGE_SCALE, as upstream's pegasus_app.resolve_scene_from_env.
+    Unset scene -> ``default_key``; unset scale -> 1.0."""
+    scene = os.environ.get("ISAAC_SIM_SCENE", "").strip()
+    scale = float(os.environ.get("ISAAC_SIM_STAGE_SCALE") or 1.0)
+    if not scene:
+        return SIMULATION_ENVIRONMENTS[default_key], scale
+    if scene in SIMULATION_ENVIRONMENTS:
+        return SIMULATION_ENVIRONMENTS[scene], scale
+    if "://" in scene or scene.endswith((".usd", ".usda", ".usdc", ".usdz")):
+        return scene, scale
+    raise ValueError(f"ISAAC_SIM_SCENE '{scene}' is neither a SIMULATION_ENVIRONMENTS key nor a USD reference")
 
-# Scale applied to /World/stage. 0.01 converts cm→m for Nucleus assets.
-# Set to 1.0 if the environment is already in meters.
-STAGE_SCALE = 1.0
+
+def resolve_spawn_xy_from_env(default=(0.0, 0.0)):
+    """ISAAC_SIM_SPAWN_XY ("x,y" in meters), as upstream's
+    pegasus_app.resolve_spawn_center_from_env. Unset -> ``default``."""
+    raw = os.environ.get("ISAAC_SIM_SPAWN_XY", "").strip()
+    if not raw:
+        return default
+    try:
+        x, y = (float(v) for v in raw.split(","))
+        return (x, y)
+    except ValueError:
+        carb.log_warn(f"ISAAC_SIM_SPAWN_XY='{raw}' is not 'x,y' — using {default}.")
+        return default
+
+
+# --------------------- CONFIGURATION ---------------------
+# Environment to load and the scale applied to /World/stage (0.01 converts
+# cm→m for Nucleus assets; 1.0 if already in meters), from ISAAC_SIM_SCENE /
+# ISAAC_SIM_STAGE_SCALE; unset -> the Pegasus default environment at scale 1.
+ENV_URL, STAGE_SCALE = resolve_scene_from_env()
+
+# Drone spawn point on the floor (meters), from ISAAC_SIM_SPAWN_XY; unset -> origin.
+SPAWN_X, SPAWN_Y = resolve_spawn_xy_from_env()
+
+# Light inside a closed scene, from ISAAC_SIM_ROOM_LIGHT ("x,y,z" in meters);
+# unset -> none. Walls + ceiling block the dome light completely, so cameras
+# inside a closed room render black without it (turning off the dome light's
+# shadows does not help: measured all-zero RGB).
+def resolve_room_light_from_env():
+    raw = os.environ.get("ISAAC_SIM_ROOM_LIGHT", "").strip()
+    if not raw:
+        return None
+    try:
+        x, y, z = (float(v) for v in raw.split(","))
+    except ValueError:
+        carb.log_warn(f"ISAAC_SIM_ROOM_LIGHT='{raw}' is not 'x,y,z' — no room light.")
+        return None
+    return x, y, z
+
+
+ROOM_LIGHT_XYZ = resolve_room_light_from_env()
+ROOM_LIGHT_RADIUS = 0.5  # m; only the size of the bright ball the cameras see
 
 # Set to a directory path to export a self-contained USD after scene prep.
 # Set to None to skip saving.
@@ -161,6 +211,7 @@ class PegasusApp:
         self.timeline.stop()
 
         # Load environment
+        print(f"[example_one] Scene: {ENV_URL} (stage_scale={STAGE_SCALE}) spawn=({SPAWN_X}, {SPAWN_Y})")
         self.pg.load_environment(ENV_URL)
 
         stage = omni.usd.get_context().get_stage()
@@ -191,6 +242,22 @@ class PegasusApp:
         # Add a dome light for uniform scene illumination.
         # Pass intensity/exposure kwargs to override defaults defined in scene_prep.
         add_dome_light(stage)
+        if ROOM_LIGHT_XYZ is not None:
+            # Sphere light whose illuminance on the floor straight below it
+            # equals the dome's on an open floor. Dome: radiance
+            # L = I_dome * 2^exposure, floor illuminance E = pi * L. Sphere of
+            # radius r and radiance L_s at distance d = z: E = L_s * pi r^2 / d^2.
+            # Equal  =>  L_s = L * d^2 / r^2.
+            from pxr import Gf, UsdGeom, UsdLux
+            dome = UsdLux.DomeLight.Get(stage, "/World/DomeLight")
+            dome_radiance = dome.GetIntensityAttr().Get() * 2.0 ** dome.GetExposureAttr().Get()
+            x, y, z = ROOM_LIGHT_XYZ
+            intensity = dome_radiance * z**2 / ROOM_LIGHT_RADIUS**2
+            light = UsdLux.SphereLight.Define(stage, "/World/RoomLight")
+            light.CreateRadiusAttr(ROOM_LIGHT_RADIUS)
+            light.CreateIntensityAttr(intensity)
+            UsdGeom.Xformable(light).AddTranslateOp().Set(Gf.Vec3d(x, y, z))
+            print(f"[example_one] Room light at ({x}, {y}, {z}), radius {ROOM_LIGHT_RADIUS} m, intensity {intensity:.0f}")
 
         # Optionally save the prepared scene as a self-contained USD package.
         # The Collector copies all Nucleus-hosted textures and MDLs locally.
@@ -218,7 +285,7 @@ class PegasusApp:
             vehicle_id=1,   # MAVLink port = 14540 + vehicle_id
             domain_id=1,    # ROS 2 domain ID — match vehicle_id by convention
             usd_file=DRONE_USD,
-            init_pos=[0.0, 0.0, 0.07],
+            init_pos=[SPAWN_X, SPAWN_Y, 0.07],
             init_orient=[0.0, 0.0, 0.0, 1.0],
         )
 

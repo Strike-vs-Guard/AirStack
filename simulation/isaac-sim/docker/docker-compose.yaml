@@ -42,6 +42,14 @@ services:
       - NUM_ROBOTS=${NUM_ROBOTS:-1}
       - ENABLE_LIDAR=${ENABLE_LIDAR:-false}
       - ISAAC_SIM_HEADLESS=${ISAAC_SIM_HEADLESS:-false}
+      # Scene (a Pegasus SIMULATION_ENVIRONMENTS key or a USD URL/path), its
+      # /World/stage scale, and the drone's spawn "x,y" in meters; read by
+      # the launch script. Empty = script default.
+      - ISAAC_SIM_SCENE=${ISAAC_SIM_SCENE:-}
+      - ISAAC_SIM_STAGE_SCALE=${ISAAC_SIM_STAGE_SCALE:-}
+      - ISAAC_SIM_SPAWN_XY=${ISAAC_SIM_SPAWN_XY:-}
+      # "x,y,z" (m): sphere light inside a closed room (black cameras otherwise).
+      - ISAAC_SIM_ROOM_LIGHT=${ISAAC_SIM_ROOM_LIGHT:-}
       # Pegasus physics tuning — read by pegasus/simulator/params.py
       - PX4_PHYSICS_HZ=${PX4_PHYSICS_HZ:-100}
       - ARDUPILOT_PHYSICS_HZ=${ARDUPILOT_PHYSICS_HZ:-800}
